@@ -336,3 +336,244 @@
     last-update-time: uint
 })
 
+;; Interest model parameters
+(define-map interest-model-params (string-ascii 10) {
+    base-rate: uint,
+    slope1: uint,
+    slope2: uint,
+    optimal-utilization: uint
+})
+
+;; Calculate the current interest rate based on utilization
+(define-read-only (calculate-interest-rate (asset-symbol (string-ascii 10)))
+    (let (
+        (pool (default-to { total-deposits: u0, total-borrows: u0, last-update-time: u0 } 
+                          (map-get? asset-pools asset-symbol)))
+        (model (default-to { 
+            base-rate: INTEREST-RATE-BASE, 
+            slope1: INTEREST-RATE-SLOPE1,
+            slope2: INTEREST-RATE-SLOPE2,
+            optimal-utilization: OPTIMAL-UTILIZATION
+        } (map-get? interest-model-params asset-symbol)))
+        (total-deposits (get total-deposits pool))
+        (total-borrows (get total-borrows pool))
+        (utilization-rate (if (is-eq total-deposits u0) 
+                             u0 
+                             (/ (* total-borrows u1000) total-deposits)))
+        (base-rate (get base-rate model))
+        (slope1 (get slope1 model))
+        (slope2 (get slope2 model))
+        (optimal-utilization (get optimal-utilization model))
+    )
+    (if (<= utilization-rate optimal-utilization)
+        (+ base-rate (/ (* utilization-rate slope1) u1000))
+        (+ base-rate (/ (* optimal-utilization slope1) u1000) 
+           (/ (* (- utilization-rate optimal-utilization) slope2) u1000))
+    ))
+)
+
+;; Update interest indices
+(define-public (update-interest-indices (asset-symbol (string-ascii 10)))
+    (let (
+        (pool (default-to { total-deposits: u0, total-borrows: u0, last-update-time: u0 } 
+                         (map-get? asset-pools asset-symbol)))
+        (indices (default-to { borrow-index: u1000000, supply-index: u1000000, last-update-time: u0 } 
+                             (map-get? interest-index asset-symbol)))
+        (current-time stacks-block-height)
+        (time-elapsed (- current-time (get last-update-time indices)))
+        (borrow-rate (calculate-interest-rate asset-symbol))
+        (borrow-interest (/ (* borrow-rate time-elapsed) SECONDS-PER-YEAR))
+        (supply-rate (if (is-eq (get total-borrows pool) u0)
+                       u0
+                       (/ (* borrow-rate (get total-borrows pool)) (get total-deposits pool))))
+        (supply-interest (/ (* supply-rate time-elapsed) SECONDS-PER-YEAR))
+        (new-borrow-index (+ (get borrow-index indices) 
+                            (/ (* (get borrow-index indices) borrow-interest) u10000)))
+        (new-supply-index (+ (get supply-index indices) 
+                            (/ (* (get supply-index indices) supply-interest) u10000)))
+    )
+        ;; Update indices
+        (map-set interest-index asset-symbol {
+            borrow-index: new-borrow-index,
+            supply-index: new-supply-index,
+            last-update-time: current-time
+        })
+        
+        
+        (ok { 
+            borrow-index: new-borrow-index, 
+            supply-index: new-supply-index 
+        })
+    )
+)
+;; Governance constants
+(define-constant VOTING-DELAY u1440) ;; ~1 day in blocks
+(define-constant VOTING-PERIOD u10080) ;; ~7 days in blocks
+(define-constant PROPOSAL-THRESHOLD u100000000000) ;; 100,000 governance tokens
+(define-constant QUORUM-VOTES u1000000000000) ;; 1,000,000 governance tokens
+
+;; Proposal states
+(define-constant PROPOSAL-STATE-PENDING u0)
+(define-constant PROPOSAL-STATE-ACTIVE u1)
+(define-constant PROPOSAL-STATE-CANCELED u2)
+(define-constant PROPOSAL-STATE-DEFEATED u3)
+(define-constant PROPOSAL-STATE-SUCCEEDED u4)
+(define-constant PROPOSAL-STATE-QUEUED u5)
+(define-constant PROPOSAL-STATE-EXECUTED u6)
+(define-constant PROPOSAL-STATE-EXPIRED u7)
+
+;; Governance token trait
+(define-trait governance-token-trait
+    (
+        (get-balance (principal) (response uint uint))
+        (get-total-supply () (response uint uint))
+    )
+)
+
+;; Timelock data structures
+(define-map timelock-transactions 
+    uint
+    {
+        target: principal,
+        function-name: (string-ascii 100),
+        parameters: (list 10 (buff 100)),
+        eta: uint,
+        executed: bool
+    }
+)
+
+;; Governance data structures
+(define-data-var governance-token principal tx-sender) ;; Should be set to governance token contract
+(define-data-var proposal-count uint u0)
+(define-data-var timelock-delay uint u172800) ;; 2 days (in seconds)
+
+(define-map proposals 
+    uint 
+    {
+        proposer: principal,
+        start-block: uint,
+        end-block: uint,
+        description: (string-utf8 500),
+        for-votes: uint,
+        against-votes: uint,
+        canceled: bool,
+        executed: bool,
+        transaction-id: uint
+    }
+)
+
+;; Risk parameters
+(define-data-var global-pause bool false)
+(define-map asset-pause (string-ascii 10) { 
+    deposits-paused: bool, 
+    borrows-paused: bool,
+    liquidations-paused: bool
+})
+
+;; Reserve factors - percentage of interest that goes to protocol reserves
+(define-map reserve-factor (string-ascii 10) uint) ;; Basis points
+
+;; Protocol reserves
+(define-map protocol-reserves (string-ascii 10) uint)
+
+;; Circuit breaker thresholds
+(define-map circuit-breakers (string-ascii 10) {
+    price-decrease-threshold: uint, ;; Basis points
+    price-increase-threshold: uint, ;; Basis points
+    borrow-increase-threshold: uint, ;; Basis points
+    deposit-decrease-threshold: uint ;; Basis points
+})
+
+;; Price history for volatility tracking
+(define-map price-history 
+    { asset: (string-ascii 10), timestamp: uint } 
+    uint
+)
+
+;; Pause/unpause protocol globally
+(define-public (set-global-pause (paused bool))
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+        (var-set global-pause paused)
+        (ok paused)
+    )
+)
+
+;; Set reserve factor for an asset
+(define-public (set-reserve-factor (asset-symbol (string-ascii 10)) (factor uint))
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+        (asserts! (<= factor u5000) ERR-INVALID-AMOUNT) ;; Max 50%
+        (map-set reserve-factor asset-symbol factor)
+        (ok factor)
+    )
+)
+
+;; Set circuit breaker thresholds
+(define-public (set-circuit-breakers 
+    (asset-symbol (string-ascii 10))
+    (price-decrease-threshold uint)
+    (price-increase-threshold uint)
+    (borrow-increase-threshold uint)
+    (deposit-decrease-threshold uint)
+)
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+        (map-set circuit-breakers asset-symbol {
+            price-decrease-threshold: price-decrease-threshold,
+            price-increase-threshold: price-increase-threshold,
+            borrow-increase-threshold: borrow-increase-threshold,
+            deposit-decrease-threshold: deposit-decrease-threshold
+        })
+        (ok true)
+    )
+)
+
+;; Risk assessment score for a position
+(define-read-only (get-position-risk-score (user principal) (position-id uint))
+    (let (
+        (position (default-to {
+                collateral-asset: "",
+                collateral-amount: u0,
+                borrow-asset: "",
+                borrow-amount: u0,
+                interest-index: u0,
+                timestamp: u0
+            } (map-get? loan-positions { owner: user, position-id: position-id })))
+        (collateral-ratio (get-collateral-ratio position))
+        (liquidation-threshold (get liquidation-threshold 
+                              (default-to {
+                                collateral-factor: u750,
+                                liquidation-threshold: LIQUIDATION-THRESHOLD,
+                                liquidation-penalty: LIQUIDATION-PENALTY,
+                                borrow-enabled: true,
+                                deposit-enabled: true
+                              } (map-get? asset-params (get collateral-asset position)))))
+        ;; Distance to liquidation - higher is safer
+        (safety-margin (- collateral-ratio liquidation-threshold))
+    )
+        ;; Convert to risk score (0-100, lower is safer)
+        (if (>= safety-margin u100) 
+            u0 ;; Very safe
+            (if (<= safety-margin u0)
+                u100 ;; Extremely risky or already liquidatable
+                (- u100 safety-margin))) ;; Linear risk score based on safety margin
+    )
+)
+
+;; Multi-collateral position data structure
+(define-map multi-collateral-positions 
+    { owner: principal, position-id: uint }
+    {
+        collaterals: (list 10 { 
+            asset: (string-ascii 10), 
+            amount: uint 
+        }),
+        borrows: (list 10 { 
+            asset: (string-ascii 10), 
+            amount: uint, 
+            interest-index: uint 
+        }),
+        timestamp: uint
+    }
+)
