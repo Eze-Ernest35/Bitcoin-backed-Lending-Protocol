@@ -336,3 +336,73 @@
     last-update-time: uint
 })
 
+;; Interest model parameters
+(define-map interest-model-params (string-ascii 10) {
+    base-rate: uint,
+    slope1: uint,
+    slope2: uint,
+    optimal-utilization: uint
+})
+
+;; Calculate the current interest rate based on utilization
+(define-read-only (calculate-interest-rate (asset-symbol (string-ascii 10)))
+    (let (
+        (pool (default-to { total-deposits: u0, total-borrows: u0, last-update-time: u0 } 
+                          (map-get? asset-pools asset-symbol)))
+        (model (default-to { 
+            base-rate: INTEREST-RATE-BASE, 
+            slope1: INTEREST-RATE-SLOPE1,
+            slope2: INTEREST-RATE-SLOPE2,
+            optimal-utilization: OPTIMAL-UTILIZATION
+        } (map-get? interest-model-params asset-symbol)))
+        (total-deposits (get total-deposits pool))
+        (total-borrows (get total-borrows pool))
+        (utilization-rate (if (is-eq total-deposits u0) 
+                             u0 
+                             (/ (* total-borrows u1000) total-deposits)))
+        (base-rate (get base-rate model))
+        (slope1 (get slope1 model))
+        (slope2 (get slope2 model))
+        (optimal-utilization (get optimal-utilization model))
+    )
+    (if (<= utilization-rate optimal-utilization)
+        (+ base-rate (/ (* utilization-rate slope1) u1000))
+        (+ base-rate (/ (* optimal-utilization slope1) u1000) 
+           (/ (* (- utilization-rate optimal-utilization) slope2) u1000))
+    ))
+)
+
+;; Update interest indices
+(define-public (update-interest-indices (asset-symbol (string-ascii 10)))
+    (let (
+        (pool (default-to { total-deposits: u0, total-borrows: u0, last-update-time: u0 } 
+                         (map-get? asset-pools asset-symbol)))
+        (indices (default-to { borrow-index: u1000000, supply-index: u1000000, last-update-time: u0 } 
+                             (map-get? interest-index asset-symbol)))
+        (current-time stacks-block-height)
+        (time-elapsed (- current-time (get last-update-time indices)))
+        (borrow-rate (calculate-interest-rate asset-symbol))
+        (borrow-interest (/ (* borrow-rate time-elapsed) SECONDS-PER-YEAR))
+        (supply-rate (if (is-eq (get total-borrows pool) u0)
+                       u0
+                       (/ (* borrow-rate (get total-borrows pool)) (get total-deposits pool))))
+        (supply-interest (/ (* supply-rate time-elapsed) SECONDS-PER-YEAR))
+        (new-borrow-index (+ (get borrow-index indices) 
+                            (/ (* (get borrow-index indices) borrow-interest) u10000)))
+        (new-supply-index (+ (get supply-index indices) 
+                            (/ (* (get supply-index indices) supply-interest) u10000)))
+    )
+        ;; Update indices
+        (map-set interest-index asset-symbol {
+            borrow-index: new-borrow-index,
+            supply-index: new-supply-index,
+            last-update-time: current-time
+        })
+        
+        
+        (ok { 
+            borrow-index: new-borrow-index, 
+            supply-index: new-supply-index 
+        })
+    )
+)
