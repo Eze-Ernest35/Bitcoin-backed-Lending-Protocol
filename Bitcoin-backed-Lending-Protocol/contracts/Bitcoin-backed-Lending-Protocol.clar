@@ -406,3 +406,58 @@
         })
     )
 )
+;; Governance constants
+(define-constant VOTING-DELAY u1440) ;; ~1 day in blocks
+(define-constant VOTING-PERIOD u10080) ;; ~7 days in blocks
+(define-constant PROPOSAL-THRESHOLD u100000000000) ;; 100,000 governance tokens
+(define-constant QUORUM-VOTES u1000000000000) ;; 1,000,000 governance tokens
+
+;; Proposal states
+(define-constant PROPOSAL-STATE-PENDING u0)
+(define-constant PROPOSAL-STATE-ACTIVE u1)
+(define-constant PROPOSAL-STATE-CANCELED u2)
+(define-constant PROPOSAL-STATE-DEFEATED u3)
+(define-constant PROPOSAL-STATE-SUCCEEDED u4)
+(define-constant PROPOSAL-STATE-QUEUED u5)
+(define-constant PROPOSAL-STATE-EXECUTED u6)
+(define-constant PROPOSAL-STATE-EXPIRED u7)
+
+;; Governance token trait
+(define-trait governance-token-trait
+    (
+        (get-balance (principal) (response uint uint))
+        (get-total-supply () (response uint uint))
+    )
+)
+
+;; Timelock data structures
+(define-map timelock-transactions 
+    uint
+    {
+        target: principal,
+        function-name: (string-ascii 100),
+        parameters: (list 10 (buff 100)),
+        eta: uint,
+        executed: bool
+    }
+)
+
+;; Governance data structures
+(define-data-var governance-token principal tx-sender) ;; Should be set to governance token contract
+(define-data-var proposal-count uint u0)
+(define-data-var timelock-delay uint u172800) ;; 2 days (in seconds)
+
+(define-map proposals 
+    uint 
+    {
+        proposer: principal,
+        start-block: uint,
+        end-block: uint,
+        description: (string-utf8 500),
+        for-votes: uint,
+        against-votes: uint,
+        canceled: bool,
+        executed: bool,
+        transaction-id: uint
+    }
+)
