@@ -317,3 +317,22 @@
         )
     )
 )
+;; Interest bearing token trait
+(define-trait interest-token-trait
+    (
+        (mint (uint principal) (response bool uint))
+        (burn (uint principal) (response bool uint))
+        (update-index (uint) (response uint uint))
+    )
+)
+
+;; Interest token contracts by asset
+(define-map asset-interest-token (string-ascii 10) principal)
+
+;; Interest indices for accurate interest tracking
+(define-map interest-index (string-ascii 10) { 
+    borrow-index: uint,
+    supply-index: uint,
+    last-update-time: uint
+})
+
