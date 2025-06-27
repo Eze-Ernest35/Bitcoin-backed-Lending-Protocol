@@ -198,3 +198,122 @@
     )
 )
 
+
+(define-read-only (get-user-positions (user principal))
+    (default-to (list) (map-get? user-position-ids user))
+)
+
+(define-read-only (get-asset-total-deposits (asset-symbol (string-ascii 10)))
+    (let (
+        (pool (default-to { total-deposits: u0, total-borrows: u0, last-update-time: u0 } 
+                          (map-get? asset-pools asset-symbol)))
+    )
+    (get total-deposits pool))
+)
+
+(define-read-only (get-asset-total-borrows (asset-symbol (string-ascii 10)))
+    (let (
+        (pool (default-to { total-deposits: u0, total-borrows: u0, last-update-time: u0 } 
+                          (map-get? asset-pools asset-symbol)))
+    )
+    (get total-borrows pool))
+)
+
+;; Flash loan constants
+(define-constant FLASH-LOAN-FEE u10) ;; 0.1% fee (basis points)
+
+;; Flash loan data
+(define-map flash-loan-state 
+    uint 
+    { 
+        active: bool,
+        borrower: principal,
+        asset: (string-ascii 10),
+        amount: uint,
+        fee: uint
+    }
+)
+
+(define-data-var flash-loan-nonce uint u0)
+
+;; Flash loans require callbacks to ensure the loan is repaid in the same transaction
+(define-trait flash-loan-receiver 
+    (
+        (execute-operation ((string-ascii 10) uint uint uint) (response bool uint))
+    )
+)
+
+(define-public (flash-loan 
+    (asset-symbol (string-ascii 10)) 
+    (amount uint) 
+    (receiver <flash-loan-receiver>)
+    (params (optional (buff 1024)))
+)
+    (let (
+        (loan-id (var-get flash-loan-nonce))
+        (asset-pool (default-to { total-deposits: u0, total-borrows: u0, last-update-time: u0 } 
+                               (map-get? asset-pools asset-symbol)))
+        (total-liquidity (get total-deposits asset-pool))
+        (fee-amount (/ (* amount FLASH-LOAN-FEE) u10000))
+    )
+        ;; Check asset is supported
+        (asserts! (is-asset-supported asset-symbol) ERR-ASSET-NOT-SUPPORTED)
+        
+        ;; Check there is enough liquidity
+        (asserts! (<= amount total-liquidity) ERR-INSUFFICIENT-LIQUIDITY)
+        
+        ;; Set flash loan state
+        (map-set flash-loan-state loan-id 
+            { 
+                active: true,
+                borrower: tx-sender,
+                asset: asset-symbol,
+                amount: amount,
+                fee: fee-amount
+            }
+        )
+        
+        ;; Increment nonce
+        (var-set flash-loan-nonce (+ loan-id u1))
+        
+        ;; Transfer funds to receiver
+
+        
+        ;; Execute operation on receiver contract
+        (match (contract-call? receiver execute-operation asset-symbol amount fee-amount loan-id)
+            success 
+            (begin
+                ;; Verify loan was repaid with fee
+                ;; In a real implementation, this would check that the funds were actually returned
+                ;; to the protocol plus the fee
+
+                ;; Update pool state to add the fee
+                (map-set asset-pools asset-symbol 
+                    { 
+                        total-deposits: (+ total-liquidity fee-amount), 
+                        total-borrows: (get total-borrows asset-pool),
+                        last-update-time:stacks-block-height
+                    }
+                )
+                
+                ;; Set loan as inactive
+                (map-set flash-loan-state loan-id 
+                    { 
+                        active: false,
+                        borrower: tx-sender,
+                        asset: asset-symbol,
+                        amount: amount,
+                        fee: fee-amount
+                    }
+                )
+                
+                (ok true)
+            )
+            error (begin
+                ;; Operation failed, but in a real transaction this would revert anyway
+                ;; Just for clarity in the code
+                (err error)
+            )
+        )
+    )
+)
